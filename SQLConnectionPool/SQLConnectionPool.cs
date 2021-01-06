@@ -1,24 +1,28 @@
 ﻿using MySql.Data.MySqlClient;
 using System;
 using System.Collections.Generic;
+using System.Data.Common;
 using System.Threading;
 using System.Threading.Tasks;
 
 namespace SQLConnectionPool.Test
 {
-    public class SQLConnectionPool : ISQLConnectionPool
+    public class SQLConnectionPool<T, Y> where T : DbConnection where Y : DbCommand
     {
-        public static SQLConnectionPool sQLConnectionPool;
+        public static SQLConnectionPool<T, Y> sQLConnectionPool;
+        private Type sqlCoon;
+        private Type sqlCmd;
 
-        SQLConnectionPool()
+        SQLConnectionPool(Type sqlCoon, Type sqlCmd)
         {
-            //Task.Run(() =>
-            //{
-            //    this.ReleaseConnection();
-            //});
+            this.sqlCoon = sqlCoon;
+            this.sqlCmd = sqlCmd;
+            Task.Run(() =>
+            {
+                ReleaseConnection();
+            });
         }
-
-        public static SQLConnectionPool GetInstance()
+        public static SQLConnectionPool<T, Y> GetInstance(Type sqlCoon, Type sqlCmd)
         {
             if (sQLConnectionPool == null)
             {
@@ -26,22 +30,21 @@ namespace SQLConnectionPool.Test
                 {
                     if (sQLConnectionPool == null)
                     {
-                        sQLConnectionPool = new SQLConnectionPool();
+                        sQLConnectionPool = new SQLConnectionPool<T, Y>(sqlCoon, sqlCmd);
                     }
                 }
             }
             return sQLConnectionPool;
         }
-
-
         public static string connectionStr { get; set; }
         public static int min { get; set; } = 5;
         public static int max { get; set; } = 10;
 
-        private static List<SQLConnectionInfo> sQLConnectionInfos = new List<SQLConnectionInfo>();
+        private static MyList<SQLConnectionInfo<T>> SQLConnectionInfos = new MyList<SQLConnectionInfo<T>>();
 
 
         private static readonly object Monitor = new object();
+
 
 
 
@@ -51,24 +54,22 @@ namespace SQLConnectionPool.Test
         /// 从数据库连接池里获取连接 如果获取不到则 进入等待 （如果必要请自行写入超时）
         /// </summary>
         /// <returns></returns>
-        public SQLConnectionInfo GetConnection()
+        public SQLConnectionInfo<T> GetConnection()
         {
             lock (Monitor)
             {
-                SQLConnectionInfo connInfo = null;
+                SQLConnectionInfo<T> connInfo = null;
                 bool canConn = false;
 
-                ReleaseConnection();
-
-                if (sQLConnectionInfos.Count <= max)
+                if (SQLConnectionInfos.Count <= max)
                 {
                     while (!canConn)
                     {
-                        connInfo = sQLConnectionInfos.Find(s => !s.isUse);
+                        connInfo = SQLConnectionInfos.Find(s => !s.isUse);
 
                         if (connInfo != null)
                         {
-                            if (connInfo.conn.TestConnection())
+                            if (TestConnection(connInfo.conn))
                             {
                                 connInfo.isUse = true;
                                 connInfo.connCount++;
@@ -76,24 +77,29 @@ namespace SQLConnectionPool.Test
                             }
                             else
                             {
-                                sQLConnectionInfos.Remove(connInfo);
+                                SQLConnectionInfos.MyRemove(connInfo);
                             }
                         }
-                        else if (sQLConnectionInfos.Count < max)
+                        else if (SQLConnectionInfos.Count < max)
                         {
-                            SQLConnectionInfo newSQLConnectionInfo = new SQLConnectionInfo { isUse = false, conn = new MySqlConnection(connectionStr) };
+                            SQLConnectionInfo<T> newSQLConnectionInfo = new SQLConnectionInfo<T>(this.sqlCoon, connectionStr) { isUse = false };
                             newSQLConnectionInfo.conn.Open();
-                            if (newSQLConnectionInfo.conn.TestConnection())
+                            if (TestConnection(newSQLConnectionInfo.conn))
                             {
                                 newSQLConnectionInfo.isUse = true;
                                 newSQLConnectionInfo.connCount++;
 
-                                sQLConnectionInfos.Add(newSQLConnectionInfo);
+                                SQLConnectionInfos.MyAdd(newSQLConnectionInfo);
 
                                 connInfo = newSQLConnectionInfo;
                                 canConn = true;
                             }
                         }
+                        else
+                        {
+                            Thread.Sleep(1000);
+                        }
+
                     }
 
 
@@ -109,41 +115,15 @@ namespace SQLConnectionPool.Test
 
         }
 
-        /// <summary>
-        /// 释放 每秒平均次数 低于1的连接 如果该连接处于连接状态则不释放
-        /// </summary>
-        private void ReleaseConnection()
-        {
-
-            Console.WriteLine($"--------------------------------目前连接池还剩余：{sQLConnectionInfos.Count}--------------------------------");
-
-            SQLConnectionInfo sQLConnectionInfo = sQLConnectionInfos.Find(s => s.isExpired && sQLConnectionInfos.Count > min && !s.isUse);
-            sQLConnectionInfos.Remove(sQLConnectionInfo);
-            sQLConnectionInfos.ForEach(s =>
-            {
-                double time = (double)(DateTime.Now - s.time).TotalSeconds;
-                Console.WriteLine($"该连接已被使用次数：{s.connCount}     是否被连接占用：{s.isUse}     " +
-                    $"次（{s.connCount}）/ 秒（{time}） = 每秒钟平均次（ {(double)s.connCount / time})     每秒平均次低于 1 该连接会被释放");
-            });
-
-        }
-
-
-
-    }
-
-    /// <summary>
-    /// 扩展方法 用于判断该连接是否可用
-    /// </summary>
-    public static class SQLConnectionPoolEx
-    {
-        public static bool TestConnection(this MySqlConnection conn)
+        public bool TestConnection(T conn)
         {
             bool result = true;
-            var cmd = new MySqlCommand("select 1", conn);
             try
             {
-                cmd.ExecuteScalar().ToString();
+                Y mySqlCommand = (Y)Activator.CreateInstance(sqlCmd);
+                mySqlCommand.Connection = conn;
+                mySqlCommand.CommandText = "select 1";
+                mySqlCommand.ExecuteScalar().ToString();
             }
             catch
             {
@@ -151,5 +131,40 @@ namespace SQLConnectionPool.Test
             }
             return result;
         }
+
+
+        /// <summary>
+        /// 释放 每秒平均次数 低于1的连接 如果该连接处于连接状态则不释放
+        /// </summary>
+        private static void ReleaseConnection()
+        {
+            while (true)
+            {
+                Console.WriteLine($"--------------------------------Pool Connection Count：{SQLConnectionInfos.Count}--------------------------------");
+
+                SQLConnectionInfo<T> SQLConnectionInfo = SQLConnectionInfos.Find(s => s.isExpired && SQLConnectionInfos.Count > min && !s.isUse);
+                SQLConnectionInfos.MyRemove(SQLConnectionInfo);
+
+                SQLConnectionInfos.ForEach(s =>
+                {
+                    double time = (double)(DateTime.Now - s.time).TotalSeconds;
+                    Console.WriteLine($"Use Count：{s.connCount}     Is Use：{s.isUse}     " +
+                        $"（{s.connCount}）Count / （{time}）S  = Count Per Second（ {(double)s.connCount / time})     每秒平均次低于 1 该连接会被释放");
+                });
+                Thread.Sleep(1000);
+            }
+
+
+        }
+
+
+
+
+
+
+
+
     }
+
+
 }

@@ -1,20 +1,25 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Data.Common;
 using System.Text;
 using MySql.Data.MySqlClient;
 
 namespace SQLConnectionPool
 {
-    public class SQLConnectionInfo
+    public class SQLConnectionInfo<T> where T : DbConnection
     {
-        public SQLConnectionInfo()
+
+        public SQLConnectionInfo(Type type,string connectionStr)
         {
 
+            conn = (T)Activator.CreateInstance(type);
+            conn.ConnectionString = connectionStr;
         }
 
         public DateTime time = DateTime.Now;
 
         public bool isUse { get; set; }
+
 
         public int connCount { get; set; }
 
@@ -35,6 +40,6 @@ namespace SQLConnectionPool
 
         }
 
-        public MySqlConnection conn { get; set; }
+        public T conn { get; set; }
     }
 }
